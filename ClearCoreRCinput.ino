@@ -86,22 +86,21 @@ void MyCallback() {
 }
 
 void enableMotors(){
-  //make sure that any interrupts happen after, so we arent partially enabled
-  noInterrupts();
   //check if the estop switch is disabled
   //true means grounded means e stop is not pressed
   if(digitalRead(interruptPin)){
-    // Enables the motors
+    //make sure that any interrupts happen after, so we arent partially enabled
+    noInterrupts();
     yawMotor.EnableRequest(true);
     pitchMotor.EnableRequest(true);
     rollMotor.EnableRequest(true);
+    interrupts(); //allow interrupts again
     //turn on indicator LED
     digitalWrite(LED_BUILTIN, true);
     if(Serial){
       Serial.println("Motors Enabled");
     }
   }
-  interrupts();
 }
 void disableMotors(){
   // Enables the motor
