@@ -139,6 +139,7 @@ void setup() {
 }
 
 void loop() {
+  Serial.println("The code for this lives at github.com/alvarezb/ClearCoreRCinput")
   enableMotors();
   if(useRCinputs){
     int yawWidth = getPulseWidth(yawPin);
