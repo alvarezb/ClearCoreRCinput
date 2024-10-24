@@ -4,6 +4,9 @@
 //TODO: implement limit switches
 //TODO: Consider using "inhibit" lines for disabling pitch axis, to prevent it from dropping
 #include "ClearCore.h"
+#include "sbus.h"
+
+#define DEBUG true
 
 #define modePin A11
 #define interruptPin A12
@@ -22,21 +25,30 @@ const int minWidth = 1000; //microseconds
 const int maxWidth = 2000; //microseconds
 const int midPoint = 1500; //microseconds
 const int deadZone = 20; //microseconds, dead zone around midPoint
-const int timeout = 5000; //microseconds, so we dont spend to long waiting for a PWM pulse
+const int timeout = 20000; //microseconds, so we dont spend to long waiting for a PWM pulse
 
-bool useRCinputs; //This will track whether we are using RC or pre-programmed running modes.
+      bool useRCinputs; //This will track whether we are using RC or pre-programmed running modes.
+const bool useSBUS = true; //toggle whether we are using pulseIn or decoding sbus to get signal from the receiver
 
-// Select the baud rate to match the target serial device
-#define baudRate 9600
+int yawWidth = midPoint; //the width (in microseconds) of the last signal received
+int pitchWidth = midPoint;
+int rollWidth = midPoint;
 
-int getPulseWidth(int pinNum){
-  int rawValue = pulseIn(pinNum, HIGH, timeout); //TODO this might need to be inverted, if the numbers are way off
-  
+// Select the baud rates to match the target serial devices
+#define baudRate 115200
+
+//sbus config
+#define sbusBaudRate 100000
+bfs::SbusRx sbus_rx(&Serial0);
+bfs::SbusData data;
+const int sbusMin = 192;
+const int sbusMax = 1792;
+
+int pulseWidthToDutyCycle(int rawValue){
   //Return immediately if signal is below noise floor. This usually means there is no signal,
   //usually because the transmitter is disconnected or another fault has occured.
   if (rawValue < noiseFloor){
     //Serial.print(pinNum);
-    //Serial.println(" Pulse width below noise floor");
     return midPoint;
   }
   
@@ -44,39 +56,40 @@ int getPulseWidth(int pinNum){
   //this prevents us from ever getting wildly miscalibrated,
   //or getting weird wrap around values on the later mapping.
   if(rawValue < minWidth){
-    Serial.print(pinNum);
-    Serial.println(rawValue);
     rawValue = minWidth;
   } else if(rawValue > maxWidth){
-    Serial.print(pinNum);
-    Serial.println(rawValue);
     rawValue = maxWidth;
   }
-  return rawValue;
+  //Serial.println(rawValue);
+
+  int dutyCycle;
+  //parse this rawValue into a single byte for PWM output
+  if(abs(rawValue-midPoint)<=deadZone){
+    //leave duty cycle at the midpoint of 128
+    dutyCycle = 128;
+  } else {
+    if (rawValue < midPoint){ //move backwards
+      dutyCycle = map(rawValue, minWidth, midPoint-deadZone, 1, 128);
+    } else if (rawValue > midPoint){ //move forwards
+      dutyCycle = map(rawValue, midPoint+deadZone, maxWidth, 128, 254);
+    } else {
+      dutyCycle = 128;
+    }
+  }
+  return dutyCycle;
 }
 
 /*
  * CommandVelocity
  *    Command the motor to move using a velocity of commandedVelocity
- *    Prints the move status to the USB serial port
  * Parameters:
  *    int pulseWidth  - The width of the input servo pulse
  *    MotorDriver motor - the motor to drive
  */
-void CommandVelocity(int pulseWidth, ClearCore::MotorDriver motor) { 
-  int dutyCycle = 128;
-  //dont move if in the deadZone
-  //Serial.print(motor.InputAConnector());
-  if(abs(pulseWidth-midPoint)<=deadZone){
-    //leave duty cycle at the midpoint of 128
-  }
-  else if (pulseWidth < midPoint){ //move backwards
-    dutyCycle = map(pulseWidth, minWidth, midPoint-deadZone, 1, 128);
-    Serial.println(dutyCycle);
-  } else { //move forwards
-    dutyCycle = map(pulseWidth, midPoint+deadZone, maxWidth, 128, 254);
-    Serial.println(dutyCycle);
-  }
+void CommandVelocity(int dutyCycle, ClearCore::MotorDriver motor) {
+  //make sure values are in [2, 253]
+  dutyCycle = min(dutyCycle, 253);
+  dutyCycle = max(2, dutyCycle);
   motor.MotorInBDuty(dutyCycle);
 }
 
@@ -92,11 +105,12 @@ void enableMotors(){
     //make sure that any interrupts happen after, so we arent partially enabled
     noInterrupts();
     yawMotor.EnableRequest(true);
-    pitchMotor.EnableRequest(true);
+    pitchMotor.EnableRequest(true); //enable the enable pins
+    pitchMotor.MotorInAState(false); //remove the inhibit signal
     rollMotor.EnableRequest(true);
-    interrupts(); //allow interrupts again
     //turn on indicator LED
     digitalWrite(LED_BUILTIN, true);
+    interrupts(); //allow interrupts again
     if(Serial){
       Serial.println("Motors Enabled");
     }
@@ -105,11 +119,13 @@ void enableMotors(){
 void disableMotors(){
   // Enables the motor
   yawMotor.EnableRequest(false);
-  pitchMotor.EnableRequest(false);
+  //pitchMotor.EnableRequest(false);
+  pitchMotor.MotorInAState(true); //use inhibit instead of enable, so it holds position.
   rollMotor.EnableRequest(false);
   digitalWrite(LED_BUILTIN, false);
+  delay(1);
   if(Serial){
-    Serial.println("Motors disabled");
+    Serial.println("Motors Disabled");
   }
 }
 
@@ -133,20 +149,50 @@ void setup() {
   // Sets all motor connectors to the correct mode for Follow Digital Velocity, Bipolar PWM mode.
   MotorMgr.MotorModeSet(MotorManager::MOTOR_ALL, Connector::CPM_MODE_A_DIRECT_B_PWM);
 
-  // Set up serial communication
+  // Set up serial communication over usb
   Serial.begin(baudRate);
+
+  //set up the sbus read
+  Serial0.begin(sbusBaudRate);
+  sbus_rx.Begin();
 }
 
 void loop() {
-  Serial.println("The code for this lives at github.com/alvarezb/ClearCoreRCinput")
+  //if(Serial){Serial.println("The code for this lives at github.com/alvarezb/ClearCoreRCinput");}
   enableMotors();
   if(useRCinputs){
-    int yawWidth = getPulseWidth(yawPin);
-    CommandVelocity(yawWidth, yawMotor);
-    int pitchWidth = getPulseWidth(pitchPin);
-    CommandVelocity(pitchWidth, pitchMotor);
-    int rollWidth = getPulseWidth(rollPin);
-    CommandVelocity(rollWidth, rollMotor);
+    if(useSBUS){
+      if (sbus_rx.Read()) {
+        data = sbus_rx.data();
+        if(data.failsafe){
+          yawWidth = midPoint;
+          pitchWidth = midPoint;
+          rollWidth = midPoint;
+        } else {
+          yawWidth = map(data.ch[0], sbusMin, sbusMax, minWidth, maxWidth); //[0] means channel 1
+          pitchWidth = map(data.ch[1], sbusMin, sbusMax, minWidth, maxWidth); //[1] -> ch 2
+          rollWidth = map(data.ch[2], sbusMin, sbusMax, minWidth, maxWidth);
+        }
+      }
+    } else {
+      yawWidth = pulseIn(yawPin, LOW, timeout);
+      pitchWidth = pulseIn(pitchPin, LOW, timeout);
+      rollWidth = pulseIn(rollPin, LOW, timeout);
+    }
+    int yawDuty = pulseWidthToDutyCycle(yawWidth);
+    int pitchDuty = pulseWidthToDutyCycle(pitchWidth);
+    int rollDuty = pulseWidthToDutyCycle(rollWidth);
+    /*
+    Serial.print("yaw: ");
+    Serial.print(yawDuty);
+    Serial.print(" pitch: ");
+    Serial.print(pitchDuty);
+    Serial.print(" roll ");
+    Serial.println(rollDuty);
+    */
+    CommandVelocity(yawDuty, yawMotor);
+    CommandVelocity(pitchDuty, pitchMotor);
+    CommandVelocity(rollDuty, rollMotor);
   } else {
     //TODO: implement the preprogrammed mode!
     Serial.println("Turret is in preprogrammed mode, which does not exist");
