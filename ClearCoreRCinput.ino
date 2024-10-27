@@ -1,20 +1,29 @@
-// Code to read 3 servo inputs from an RC controller, and then drive output velocity based on the pwm signal values
+// Code to read 3 channels from an RC controller, and then drive motor output velocity based on the signal values
 
 //TODO: implement pre-programmed mode
 //TODO: implement limit switches
-//TODO: Consider using "inhibit" lines for disabling pitch axis, to prevent it from dropping
+
+//https://www.teknic.com/files/downloads/manual_install_instructions_arduino.pdf
 #include "ClearCore.h"
+
+//https://github.com/bolderflight/sbus
 #include "sbus.h"
 
+//toggle some of the print statements
 #define DEBUG true
 
+//the pin which switches between RC and preprogrammed modes
 #define modePin A11
+
+//the pin which handles the estop
 #define interruptPin A12
 
+//when using PWM inputs, which pins are the inputs connected to?
 #define yawPin DI6
 #define pitchPin DI7
 #define rollPin DI8
 
+//which connectors are the motors on?
 #define yawMotor ConnectorM0
 #define pitchMotor ConnectorM1
 #define rollMotor ConnectorM2
@@ -28,8 +37,12 @@ const int deadZone = 20; //microseconds, dead zone around midPoint
 const int timeout = 20000; //microseconds, so we dont spend to long waiting for a PWM pulse
 
       bool useRCinputs; //This will track whether we are using RC or pre-programmed running modes.
+
+// on the clearcore we need to use an sbus RC receiver, it doesnt have a fast enough clock
+// to read normal PWM signals using pulseIn.
 const bool useSBUS = true; //toggle whether we are using pulseIn or decoding sbus to get signal from the receiver
 
+//initialize the input values to the midpoint, aka stopped.
 int yawWidth = midPoint; //the width (in microseconds) of the last signal received
 int pitchWidth = midPoint;
 int rollWidth = midPoint;
@@ -65,7 +78,7 @@ int pulseWidthToDutyCycle(int rawValue){
   int dutyCycle;
   //parse this rawValue into a single byte for PWM output
   if(abs(rawValue-midPoint)<=deadZone){
-    //leave duty cycle at the midpoint of 128
+    //leave duty cycle at the midpoint of 128 if we're within the deadzone
     dutyCycle = 128;
   } else {
     if (rawValue < midPoint){ //move backwards
@@ -105,7 +118,7 @@ void enableMotors(){
     //make sure that any interrupts happen after, so we arent partially enabled
     noInterrupts();
     yawMotor.EnableRequest(true);
-    pitchMotor.EnableRequest(true); //enable the enable pins
+    pitchMotor.EnableRequest(true); //enable the enable pins. We need this to do the first enable.
     pitchMotor.MotorInAState(false); //remove the inhibit signal
     rollMotor.EnableRequest(true);
     //turn on indicator LED
@@ -123,7 +136,7 @@ void disableMotors(){
   pitchMotor.MotorInAState(true); //use inhibit instead of enable, so it holds position.
   rollMotor.EnableRequest(false);
   digitalWrite(LED_BUILTIN, false);
-  delay(1);
+  delay(1); //not exactly sure why this is needed, but it did not trigger reliably without it
   if(Serial){
     Serial.println("Motors Disabled");
   }
@@ -161,24 +174,32 @@ void loop() {
   //if(Serial){Serial.println("The code for this lives at github.com/alvarezb/ClearCoreRCinput");}
   enableMotors();
   if(useRCinputs){
+    //you need to use sbus on the clearcore, but you can use normal PWM instead on an arduino
     if(useSBUS){
       if (sbus_rx.Read()) {
         data = sbus_rx.data();
         if(data.failsafe){
+          //the failsafe triggers when the receiver disconnects.
+          //Set all the values to their mid (aka stopped) point
           yawWidth = midPoint;
           pitchWidth = midPoint;
           rollWidth = midPoint;
         } else {
+          //read the data from the SBUS. We're only using channels 1-3 for this turret.
           yawWidth = map(data.ch[0], sbusMin, sbusMax, minWidth, maxWidth); //[0] means channel 1
           pitchWidth = map(data.ch[1], sbusMin, sbusMax, minWidth, maxWidth); //[1] -> ch 2
           rollWidth = map(data.ch[2], sbusMin, sbusMax, minWidth, maxWidth);
         }
       }
     } else {
+      //This version will not work on the clearcore - its pulseIn is too slow
+      //the clearcore can only read in 200us increments
       yawWidth = pulseIn(yawPin, LOW, timeout);
       pitchWidth = pulseIn(pitchPin, LOW, timeout);
       rollWidth = pulseIn(rollPin, LOW, timeout);
     }
+    //convert the pulseWidth (roughtly 1000-2000 microSeconds) into
+    //duty cycle (0-255).
     int yawDuty = pulseWidthToDutyCycle(yawWidth);
     int pitchDuty = pulseWidthToDutyCycle(pitchWidth);
     int rollDuty = pulseWidthToDutyCycle(rollWidth);
@@ -190,11 +211,13 @@ void loop() {
     Serial.print(" roll ");
     Serial.println(rollDuty);
     */
+
+    //send these values to the motors
     CommandVelocity(yawDuty, yawMotor);
     CommandVelocity(pitchDuty, pitchMotor);
     CommandVelocity(rollDuty, rollMotor);
   } else {
-    //TODO: implement the preprogrammed mode!
-    Serial.println("Turret is in preprogrammed mode, which does not exist");
+    //we want to run in pre-programmed mode
+    Serial.println("Turret is in preprogrammed mode, which has not been implemented yet");
   }
 }
